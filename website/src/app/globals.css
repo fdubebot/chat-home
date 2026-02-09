@@ -1,0 +1,17 @@
+@import "tailwindcss";
+
+:root {
+  color-scheme: dark;
+}
+
+a {
+  text-decoration: none;
+}
+
+.section-title {
+  @apply text-3xl font-semibold tracking-tight text-white;
+}
+
+.card {
+  @apply rounded-xl border border-slate-800 bg-slate-900/50 p-5;
+}
