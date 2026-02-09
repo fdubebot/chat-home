@@ -1,0 +1,5 @@
+# Secrets
+secrets/*.env
+secrets/*.key
+secrets/*.json
+!secrets/*.example
