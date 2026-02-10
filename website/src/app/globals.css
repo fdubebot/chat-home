@@ -4,6 +4,13 @@
   color-scheme: dark;
 }
 
+body {
+  background:
+    radial-gradient(900px 500px at 10% -10%, rgba(56, 189, 248, 0.18), transparent 55%),
+    radial-gradient(700px 420px at 90% 0%, rgba(99, 102, 241, 0.16), transparent 50%),
+    #020617;
+}
+
 a {
   text-decoration: none;
 }
@@ -13,5 +20,9 @@ a {
 }
 
 .card {
-  @apply rounded-xl border border-slate-800 bg-slate-900/50 p-5;
+  @apply rounded-2xl border border-slate-800/90 bg-slate-900/55 p-5 shadow-[0_12px_35px_rgba(2,6,23,0.45)] backdrop-blur;
+}
+
+.pill {
+  @apply inline-flex items-center rounded-full border border-sky-400/30 bg-sky-500/10 px-3 py-1 text-xs font-medium text-sky-200;
 }

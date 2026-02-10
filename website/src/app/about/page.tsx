@@ -19,7 +19,7 @@ export default function AboutPage() {
       <div className="card">
         <h2 className="text-lg font-semibold text-white">Core Expertise</h2>
         <ul className="mt-3 list-disc space-y-1 pl-5 text-slate-300">
-          <li>SystemVerilog / UVM</li>
+          <li>SystemVerilog / UVM / cocotb / pyuvm</li>
           <li>FPGA / ASIC verification</li>
           <li>Verification planning and team leadership</li>
           <li>AMBA (AHB/APB), CAN, SpaceWire, MIL-STD-1553, SPI, Flash</li>
