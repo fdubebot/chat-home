@@ -1,4 +1,5 @@
 import Image from "next/image";
+import SpotifyTopTracks from "@/components/SpotifyTopTracks";
 
 export default function HomePage() {
   return (
@@ -39,6 +40,8 @@ export default function HomePage() {
           </li>
         </ul>
       </section>
+
+      <SpotifyTopTracks />
     </div>
   );
 }
