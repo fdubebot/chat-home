@@ -7,7 +7,8 @@ Voice-calling workflow skeleton for phone reservations.
 - API skeleton for reservation call orchestration
 - Call state machine + in-memory store
 - Guardrail policy hooks
-- Twilio webhook placeholders
+- Real Twilio outbound call creation (when env vars are set)
+- TwiML voice loop endpoints (`/api/twilio/voice`, `/api/twilio/gather`)
 - User approval endpoint before final confirmation
 
 ## Quickstart

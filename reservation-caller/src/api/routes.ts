@@ -3,6 +3,8 @@ import { z } from "zod";
 import { createCall, getCall, updateStatus, addTranscript, setOutcome, attachTwilioSid, listCalls } from "../core/store.js";
 import { buildAssistantIntro, needsHumanConfirmation } from "../core/policy.js";
 import { hasTwilioConfig } from "../config/env.js";
+import { createOutboundCall } from "../core/twilio.js";
+import twilio from "twilio";
 
 const reservationSchema = z.object({
   requestId: z.string().optional().default(""),
@@ -26,7 +28,7 @@ router.get("/api/calls", (_req, res) => {
   res.json({ calls: listCalls() });
 });
 
-router.post("/api/calls/start", (req, res) => {
+router.post("/api/calls/start", async (req, res) => {
   const parsed = reservationSchema.safeParse(req.body);
   if (!parsed.success) {
     return res.status(400).json({ error: parsed.error.flatten() });
@@ -36,23 +38,162 @@ router.post("/api/calls/start", (req, res) => {
   updateStatus(call.id, "DIALING");
   addTranscript(call.id, "assistant", buildAssistantIntro(call.reservation));
 
-  // Twilio outbound call creation goes here in next increment.
-  // For now we simulate queued outbound dial.
-  attachTwilioSid(call.id, `SIM-${call.id.slice(0, 8)}`);
+  if (!hasTwilioConfig()) {
+    attachTwilioSid(call.id, `SIM-${call.id.slice(0, 8)}`);
+    return res.status(202).json({
+      message: "Call queued (simulation mode)",
+      callId: call.id,
+      simulated: true,
+    });
+  }
 
-  return res.status(202).json({
-    message: "Call queued",
-    callId: call.id,
-    simulated: true,
-  });
+  try {
+    const outbound = await createOutboundCall({ to: call.reservation.businessPhone, callId: call.id });
+    attachTwilioSid(call.id, outbound.sid);
+    addTranscript(call.id, "system", `Twilio call created: ${outbound.sid}`);
+
+    return res.status(202).json({
+      message: "Twilio call queued",
+      callId: call.id,
+      twilioCallSid: outbound.sid,
+      simulated: false,
+    });
+  } catch (error) {
+    updateStatus(call.id, "FAILED");
+    addTranscript(call.id, "system", `Twilio error: ${error instanceof Error ? error.message : "unknown"}`);
+    return res.status(502).json({ error: "Failed to create Twilio call" });
+  }
 });
 
 router.post("/api/twilio/status", (req, res) => {
-  const { callId, status } = req.body as { callId?: string; status?: string };
+  const callId = String(req.query.callId || req.body?.callId || "");
+  const status = String(req.body?.CallStatus || req.body?.status || "");
   if (!callId || !status) return res.status(400).json({ error: "callId and status required" });
-  updateStatus(callId, status as never);
+
+  const mapped =
+    status === "ringing" || status === "initiated"
+      ? "DIALING"
+      : status === "answered"
+        ? "CONNECTED"
+        : status === "completed"
+          ? "ENDED"
+          : "NEGOTIATION";
+
+  updateStatus(callId, mapped);
   addTranscript(callId, "system", `Twilio status: ${status}`);
   return res.json({ ok: true });
+});
+
+router.post("/api/twilio/voice", (req, res) => {
+  const callId = String(req.query.callId || "");
+  const call = getCall(callId);
+  if (!call) return res.status(404).send("Unknown call");
+
+  updateStatus(callId, "DISCOVERY");
+
+  const vr = new twilio.twiml.VoiceResponse();
+  vr.say({ voice: "alice" }, buildAssistantIntro(call.reservation));
+  vr.say(
+    { voice: "alice" },
+    "Could you confirm availability and any important conditions like deposit or cancellation policy?",
+  );
+
+  const gather = vr.gather({
+    input: ["speech"],
+    speechTimeout: "auto",
+    action: `/api/twilio/gather?callId=${encodeURIComponent(callId)}`,
+    method: "POST",
+  });
+  gather.say({ voice: "alice" }, "I am listening.");
+
+  vr.say({ voice: "alice" }, "Sorry, I did not catch that.");
+  vr.redirect({ method: "POST" }, `/api/twilio/voice?callId=${encodeURIComponent(callId)}`);
+
+  res.type("text/xml").send(vr.toString());
+});
+
+router.post("/api/twilio/gather", (req, res) => {
+  const callId = String(req.query.callId || "");
+  const speech = String(req.body?.SpeechResult || "").trim();
+  const call = getCall(callId);
+
+  if (!call) return res.status(404).send("Unknown call");
+
+  addTranscript(callId, "business", speech || "(no speech captured)");
+
+  const vr = new twilio.twiml.VoiceResponse();
+
+  if (!speech) {
+    vr.say({ voice: "alice" }, "I did not hear a response. I will follow up later. Thank you.");
+    updateStatus(callId, "FAILED");
+    setOutcome(callId, {
+      status: "failed",
+      needsUserApproval: false,
+      confidence: 0.4,
+      reason: "No speech captured",
+    });
+    vr.hangup();
+    return res.type("text/xml").send(vr.toString());
+  }
+
+  const lower = speech.toLowerCase();
+  const hasAvailabilitySignal = /(yes|available|we can|sure|ok|okay)/.test(lower);
+  const unavailableSignal = /(no availability|not available|fully booked|sold out|cannot)/.test(lower);
+  const risky = needsHumanConfirmation(speech, call.reservation.policy?.allowAutoConfirm ?? false);
+
+  if (unavailableSignal) {
+    updateStatus(callId, "FAILED");
+    setOutcome(callId, {
+      status: "failed",
+      needsUserApproval: false,
+      confidence: 0.9,
+      reason: "Business reported no availability",
+    });
+    vr.say({ voice: "alice" }, "Understood, thank you for checking. Have a great day.");
+    vr.hangup();
+    return res.type("text/xml").send(vr.toString());
+  }
+
+  if (hasAvailabilitySignal) {
+    const needsApproval = risky || !(call.reservation.policy?.allowAutoConfirm ?? false);
+
+    setOutcome(callId, {
+      status: needsApproval ? "pending" : "confirmed",
+      needsUserApproval: needsApproval,
+      confidence: 0.8,
+      reason: risky ? "Potential risky condition mentioned" : "Availability found",
+      confirmedDetails: {
+        date: call.reservation.date,
+        time: call.reservation.timePreferred,
+        partySize: call.reservation.partySize,
+        name: call.reservation.nameForBooking,
+        notes: speech,
+      },
+    });
+
+    updateStatus(callId, needsApproval ? "WAITING_USER_APPROVAL" : "CONFIRMED");
+
+    vr.say(
+      { voice: "alice" },
+      needsApproval
+        ? "Thank you. I need to confirm final details with Felix and will call back if needed."
+        : `Perfect. Please confirm the reservation under ${call.reservation.nameForBooking}. Thank you.`,
+    );
+    vr.hangup();
+    return res.type("text/xml").send(vr.toString());
+  }
+
+  updateStatus(callId, "NEGOTIATION");
+  vr.say({ voice: "alice" }, "Thanks. Could you repeat the available time and any reservation conditions?");
+  const gather = vr.gather({
+    input: ["speech"],
+    speechTimeout: "auto",
+    action: `/api/twilio/gather?callId=${encodeURIComponent(callId)}`,
+    method: "POST",
+  });
+  gather.say({ voice: "alice" }, "I am listening.");
+
+  return res.type("text/xml").send(vr.toString());
 });
 
 router.post("/api/calls/:id/approve", (req, res) => {
