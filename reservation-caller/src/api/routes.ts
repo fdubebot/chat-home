@@ -21,6 +21,47 @@ const reservationSchema = z.object({
 
 export const router = express.Router();
 
+function applyDecision(id: string, decision: "approve" | "revise" | "cancel", notes: string | undefined) {
+  const call = getCall(id);
+  if (!call) return { error: "Call not found" as const };
+
+  if (decision === "approve") {
+    setOutcome(id, {
+      status: "confirmed",
+      needsUserApproval: false,
+      confidence: 0.95,
+      reason: "Approved by user",
+      confirmedDetails: {
+        date: call.reservation.date,
+        time: call.reservation.timePreferred,
+        partySize: call.reservation.partySize,
+        name: call.reservation.nameForBooking,
+        notes,
+      },
+    });
+    updateStatus(id, "CONFIRMED");
+    void notifyOpenClaw("call_confirmed", {
+      callId: id,
+      businessName: call.reservation.businessName,
+      confirmed: {
+        date: call.reservation.date,
+        time: call.reservation.timePreferred,
+        partySize: call.reservation.partySize,
+        name: call.reservation.nameForBooking,
+      },
+    });
+  } else if (decision === "cancel") {
+    setOutcome(id, { status: "failed", needsUserApproval: false, confidence: 1, reason: "Cancelled by user" });
+    updateStatus(id, "FAILED");
+    void notifyOpenClaw("call_cancelled", { callId: id, businessName: call.reservation.businessName });
+  } else {
+    updateStatus(id, "NEGOTIATION");
+    addTranscript(id, "system", `User revision requested: ${notes || "(no notes)"}`);
+  }
+
+  return { call: getCall(id) };
+}
+
 function verifyTwilioRequest(req: express.Request, res: express.Response, next: express.NextFunction) {
   if (!hasTwilioConfig()) return next();
 
@@ -95,6 +136,45 @@ router.post("/api/twilio/status", verifyTwilioRequest, (req, res) => {
   updateStatus(callId, mapped);
   addTranscript(callId, "system", `Twilio status: ${status}`);
   return res.json({ ok: true });
+});
+
+router.post("/api/openclaw/callback", (req, res) => {
+  const event = String(req.body?.event || "");
+  const callId = String(req.body?.callId || "");
+
+  if (!event) return res.status(400).json({ error: "event required" });
+
+  if (event === "approval_required") {
+    const call = getCall(callId);
+    if (!call) return res.status(404).json({ error: "Call not found" });
+
+    return res.json({
+      ok: true,
+      message:
+        `Approval needed: ${call.reservation.businessName} for ${call.reservation.partySize} on ${call.reservation.date} ${call.reservation.timePreferred}.`,
+      actions: [
+        { label: "Approve", method: "POST", path: "/api/openclaw/decision", body: { callId, decision: "approve" } },
+        { label: "Revise", method: "POST", path: "/api/openclaw/decision", body: { callId, decision: "revise" } },
+        { label: "Cancel", method: "POST", path: "/api/openclaw/decision", body: { callId, decision: "cancel" } },
+      ],
+    });
+  }
+
+  return res.json({ ok: true, event, callId });
+});
+
+router.post("/api/openclaw/decision", (req, res) => {
+  const callId = String(req.body?.callId || "");
+  const decision = String(req.body?.decision || "") as "approve" | "revise" | "cancel";
+  const notes = typeof req.body?.notes === "string" ? req.body.notes : undefined;
+
+  if (!callId || !decision) return res.status(400).json({ error: "callId and decision required" });
+  if (!["approve", "revise", "cancel"].includes(decision)) return res.status(400).json({ error: "Invalid decision" });
+
+  const result = applyDecision(callId, decision, notes);
+  if ("error" in result) return res.status(404).json({ error: result.error });
+
+  return res.json({ ok: true, call: result.call });
 });
 
 router.post("/api/twilio/voice", verifyTwilioRequest, (req, res) => {
@@ -234,45 +314,12 @@ router.post("/api/twilio/gather", verifyTwilioRequest, (req, res) => {
 router.post("/api/calls/:id/approve", (req, res) => {
   const id = req.params.id;
   const { decision, notes } = req.body as { decision?: "approve" | "revise" | "cancel"; notes?: string };
-  const call = getCall(id);
-  if (!call) return res.status(404).json({ error: "Call not found" });
   if (!decision) return res.status(400).json({ error: "decision required" });
 
-  if (decision === "approve") {
-    setOutcome(id, {
-      status: "confirmed",
-      needsUserApproval: false,
-      confidence: 0.95,
-      reason: "Approved by user",
-      confirmedDetails: {
-        date: call.reservation.date,
-        time: call.reservation.timePreferred,
-        partySize: call.reservation.partySize,
-        name: call.reservation.nameForBooking,
-        notes,
-      },
-    });
-    updateStatus(id, "CONFIRMED");
-    void notifyOpenClaw("call_confirmed", {
-      callId: id,
-      businessName: call.reservation.businessName,
-      confirmed: {
-        date: call.reservation.date,
-        time: call.reservation.timePreferred,
-        partySize: call.reservation.partySize,
-        name: call.reservation.nameForBooking,
-      },
-    });
-  } else if (decision === "cancel") {
-    setOutcome(id, { status: "failed", needsUserApproval: false, confidence: 1, reason: "Cancelled by user" });
-    updateStatus(id, "FAILED");
-    void notifyOpenClaw("call_cancelled", { callId: id, businessName: call.reservation.businessName });
-  } else {
-    updateStatus(id, "NEGOTIATION");
-    addTranscript(id, "system", `User revision requested: ${notes || "(no notes)"}`);
-  }
+  const result = applyDecision(id, decision, notes);
+  if ("error" in result) return res.status(404).json({ error: result.error });
 
-  return res.json({ ok: true, call: getCall(id) });
+  return res.json({ ok: true, call: result.call });
 });
 
 router.get("/api/calls/:id", (req, res) => {

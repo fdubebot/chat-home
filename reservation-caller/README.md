@@ -11,6 +11,7 @@ Voice-calling workflow skeleton for phone reservations.
 - TwiML voice loop endpoints (`/api/twilio/voice`, `/api/twilio/gather`)
 - Twilio webhook signature verification
 - OpenClaw callback hook for approval/confirmation events
+- OpenClaw receiver endpoints (`/api/openclaw/callback`, `/api/openclaw/decision`)
 - User approval endpoint before final confirmation
 
 ## Quickstart
