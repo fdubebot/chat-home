@@ -1,7 +1,29 @@
 import { randomUUID } from "node:crypto";
+import fs from "node:fs";
+import path from "node:path";
 import type { CallRecord, ReservationRequest, CallStatus, CallOutcome } from "../types/reservation.js";
+import { env } from "../config/env.js";
 
 const calls = new Map<string, CallRecord>();
+
+function persist() {
+  const filePath = path.resolve(env.dataFile);
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  fs.writeFileSync(filePath, JSON.stringify(Array.from(calls.values()), null, 2));
+}
+
+function load() {
+  const filePath = path.resolve(env.dataFile);
+  if (!fs.existsSync(filePath)) return;
+  const raw = fs.readFileSync(filePath, "utf8");
+  if (!raw.trim()) return;
+  const parsed = JSON.parse(raw) as CallRecord[];
+  for (const rec of parsed) {
+    calls.set(rec.id, rec);
+  }
+}
+
+load();
 
 export function createCall(reservation: ReservationRequest): CallRecord {
   const now = new Date().toISOString();
@@ -15,6 +37,7 @@ export function createCall(reservation: ReservationRequest): CallRecord {
     transcript: [{ at: now, speaker: "system", text: "Call created" }],
   };
   calls.set(id, rec);
+  persist();
   return rec;
 }
 
@@ -27,6 +50,7 @@ export function updateStatus(id: string, status: CallStatus) {
   if (!rec) return;
   rec.status = status;
   rec.updatedAt = new Date().toISOString();
+  persist();
 }
 
 export function addTranscript(id: string, speaker: "assistant" | "business" | "system", text: string) {
@@ -34,6 +58,7 @@ export function addTranscript(id: string, speaker: "assistant" | "business" | "s
   if (!rec) return;
   rec.transcript.push({ at: new Date().toISOString(), speaker, text });
   rec.updatedAt = new Date().toISOString();
+  persist();
 }
 
 export function setOutcome(id: string, outcome: CallOutcome) {
@@ -41,6 +66,7 @@ export function setOutcome(id: string, outcome: CallOutcome) {
   if (!rec) return;
   rec.outcome = outcome;
   rec.updatedAt = new Date().toISOString();
+  persist();
 }
 
 export function attachTwilioSid(id: string, sid: string) {
@@ -48,6 +74,7 @@ export function attachTwilioSid(id: string, sid: string) {
   if (!rec) return;
   rec.twilioCallSid = sid;
   rec.updatedAt = new Date().toISOString();
+  persist();
 }
 
 export function listCalls() {

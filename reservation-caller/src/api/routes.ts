@@ -2,8 +2,9 @@ import express from "express";
 import { z } from "zod";
 import { createCall, getCall, updateStatus, addTranscript, setOutcome, attachTwilioSid, listCalls } from "../core/store.js";
 import { buildAssistantIntro, needsHumanConfirmation } from "../core/policy.js";
-import { hasTwilioConfig } from "../config/env.js";
+import { env, hasTwilioConfig } from "../config/env.js";
 import { createOutboundCall } from "../core/twilio.js";
+import { notifyOpenClaw } from "../core/notify.js";
 import twilio from "twilio";
 
 const reservationSchema = z.object({
@@ -19,6 +20,18 @@ const reservationSchema = z.object({
 });
 
 export const router = express.Router();
+
+function verifyTwilioRequest(req: express.Request, res: express.Response, next: express.NextFunction) {
+  if (!hasTwilioConfig()) return next();
+
+  const signature = req.header("x-twilio-signature") || "";
+  const url = `${env.appBaseUrl}${req.originalUrl}`;
+  const params = req.body as Record<string, string>;
+
+  const ok = twilio.validateRequest(env.twilioAuthToken, signature, url, params);
+  if (!ok) return res.status(403).json({ error: "Invalid Twilio signature" });
+  return next();
+}
 
 router.get("/health", (_req, res) => {
   res.json({ ok: true, twilioConfigured: hasTwilioConfig() });
@@ -65,7 +78,7 @@ router.post("/api/calls/start", async (req, res) => {
   }
 });
 
-router.post("/api/twilio/status", (req, res) => {
+router.post("/api/twilio/status", verifyTwilioRequest, (req, res) => {
   const callId = String(req.query.callId || req.body?.callId || "");
   const status = String(req.body?.CallStatus || req.body?.status || "");
   if (!callId || !status) return res.status(400).json({ error: "callId and status required" });
@@ -84,7 +97,7 @@ router.post("/api/twilio/status", (req, res) => {
   return res.json({ ok: true });
 });
 
-router.post("/api/twilio/voice", (req, res) => {
+router.post("/api/twilio/voice", verifyTwilioRequest, (req, res) => {
   const callId = String(req.query.callId || "");
   const call = getCall(callId);
   if (!call) return res.status(404).send("Unknown call");
@@ -112,7 +125,7 @@ router.post("/api/twilio/voice", (req, res) => {
   res.type("text/xml").send(vr.toString());
 });
 
-router.post("/api/twilio/gather", (req, res) => {
+router.post("/api/twilio/gather", verifyTwilioRequest, (req, res) => {
   const callId = String(req.query.callId || "");
   const speech = String(req.body?.SpeechResult || "").trim();
   const call = getCall(callId);
@@ -149,6 +162,11 @@ router.post("/api/twilio/gather", (req, res) => {
       confidence: 0.9,
       reason: "Business reported no availability",
     });
+    void notifyOpenClaw("call_failed", {
+      callId,
+      businessName: call.reservation.businessName,
+      reason: "Business reported no availability",
+    });
     vr.say({ voice: "alice" }, "Understood, thank you for checking. Have a great day.");
     vr.hangup();
     return res.type("text/xml").send(vr.toString());
@@ -172,6 +190,23 @@ router.post("/api/twilio/gather", (req, res) => {
     });
 
     updateStatus(callId, needsApproval ? "WAITING_USER_APPROVAL" : "CONFIRMED");
+
+    if (needsApproval) {
+      void notifyOpenClaw("approval_required", {
+        callId,
+        businessName: call.reservation.businessName,
+        phone: call.reservation.businessPhone,
+        date: call.reservation.date,
+        time: call.reservation.timePreferred,
+        partySize: call.reservation.partySize,
+        notes: speech,
+      });
+    } else {
+      void notifyOpenClaw("call_confirmed", {
+        callId,
+        businessName: call.reservation.businessName,
+      });
+    }
 
     vr.say(
       { voice: "alice" },
@@ -218,9 +253,20 @@ router.post("/api/calls/:id/approve", (req, res) => {
       },
     });
     updateStatus(id, "CONFIRMED");
+    void notifyOpenClaw("call_confirmed", {
+      callId: id,
+      businessName: call.reservation.businessName,
+      confirmed: {
+        date: call.reservation.date,
+        time: call.reservation.timePreferred,
+        partySize: call.reservation.partySize,
+        name: call.reservation.nameForBooking,
+      },
+    });
   } else if (decision === "cancel") {
     setOutcome(id, { status: "failed", needsUserApproval: false, confidence: 1, reason: "Cancelled by user" });
     updateStatus(id, "FAILED");
+    void notifyOpenClaw("call_cancelled", { callId: id, businessName: call.reservation.businessName });
   } else {
     updateStatus(id, "NEGOTIATION");
     addTranscript(id, "system", `User revision requested: ${notes || "(no notes)"}`);

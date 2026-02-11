@@ -6,6 +6,9 @@ export const env = {
   twilioAccountSid: process.env.TWILIO_ACCOUNT_SID || "",
   twilioAuthToken: process.env.TWILIO_AUTH_TOKEN || "",
   twilioPhoneNumber: process.env.TWILIO_PHONE_NUMBER || "",
+  openclawCallbackUrl: process.env.OPENCLAW_CALLBACK_URL || "",
+  openclawCallbackToken: process.env.OPENCLAW_CALLBACK_TOKEN || "",
+  dataFile: process.env.DATA_FILE || "./data/calls.json",
 };
 
 export function hasTwilioConfig() {

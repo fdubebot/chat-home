@@ -5,10 +5,12 @@ Voice-calling workflow skeleton for phone reservations.
 ## What is implemented
 
 - API skeleton for reservation call orchestration
-- Call state machine + in-memory store
+- Call state machine + JSON persistence (`DATA_FILE`)
 - Guardrail policy hooks
 - Real Twilio outbound call creation (when env vars are set)
 - TwiML voice loop endpoints (`/api/twilio/voice`, `/api/twilio/gather`)
+- Twilio webhook signature verification
+- OpenClaw callback hook for approval/confirmation events
 - User approval endpoint before final confirmation
 
 ## Quickstart
@@ -24,6 +26,13 @@ Health:
 ```bash
 curl http://localhost:8787/health
 ```
+
+Optional callbacks to OpenClaw session:
+
+- `OPENCLAW_CALLBACK_URL` — webhook endpoint you control
+- `OPENCLAW_CALLBACK_TOKEN` — optional bearer token
+
+When a call needs approval, the service sends an `approval_required` event with call details.
 
 ## Example flow
 
