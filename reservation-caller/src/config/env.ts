@@ -9,6 +9,9 @@ export const env = {
   openclawCallbackUrl: process.env.OPENCLAW_CALLBACK_URL || "",
   openclawCallbackToken: process.env.OPENCLAW_CALLBACK_TOKEN || "",
   dataFile: process.env.DATA_FILE || "./data/calls.json",
+  telegramBotToken: process.env.TELEGRAM_BOT_TOKEN || "",
+  telegramChatId: process.env.TELEGRAM_CHAT_ID || "",
+  telegramWebhookSecret: process.env.TELEGRAM_WEBHOOK_SECRET || "",
 };
 
 export function hasTwilioConfig() {

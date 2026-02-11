@@ -1,11 +1,14 @@
 import express from "express";
 import { z } from "zod";
-import { createCall, getCall, updateStatus, addTranscript, setOutcome, attachTwilioSid, listCalls } from "../core/store.js";
-import { buildAssistantIntro, needsHumanConfirmation } from "../core/policy.js";
+import twilio from "twilio";
+
 import { env, hasTwilioConfig } from "../config/env.js";
 import { createOutboundCall } from "../core/twilio.js";
 import { notifyOpenClaw } from "../core/notify.js";
-import twilio from "twilio";
+import { applyDecision } from "../core/decision.js";
+import { answerCallbackQuery, editMessage, sendApprovalPrompt } from "../core/telegram.js";
+import { buildAssistantIntro, needsHumanConfirmation } from "../core/policy.js";
+import { createCall, getCall, updateStatus, addTranscript, setOutcome, attachTwilioSid, listCalls } from "../core/store.js";
 
 const reservationSchema = z.object({
   requestId: z.string().optional().default(""),
@@ -20,47 +23,6 @@ const reservationSchema = z.object({
 });
 
 export const router = express.Router();
-
-function applyDecision(id: string, decision: "approve" | "revise" | "cancel", notes: string | undefined) {
-  const call = getCall(id);
-  if (!call) return { error: "Call not found" as const };
-
-  if (decision === "approve") {
-    setOutcome(id, {
-      status: "confirmed",
-      needsUserApproval: false,
-      confidence: 0.95,
-      reason: "Approved by user",
-      confirmedDetails: {
-        date: call.reservation.date,
-        time: call.reservation.timePreferred,
-        partySize: call.reservation.partySize,
-        name: call.reservation.nameForBooking,
-        notes,
-      },
-    });
-    updateStatus(id, "CONFIRMED");
-    void notifyOpenClaw("call_confirmed", {
-      callId: id,
-      businessName: call.reservation.businessName,
-      confirmed: {
-        date: call.reservation.date,
-        time: call.reservation.timePreferred,
-        partySize: call.reservation.partySize,
-        name: call.reservation.nameForBooking,
-      },
-    });
-  } else if (decision === "cancel") {
-    setOutcome(id, { status: "failed", needsUserApproval: false, confidence: 1, reason: "Cancelled by user" });
-    updateStatus(id, "FAILED");
-    void notifyOpenClaw("call_cancelled", { callId: id, businessName: call.reservation.businessName });
-  } else {
-    updateStatus(id, "NEGOTIATION");
-    addTranscript(id, "system", `User revision requested: ${notes || "(no notes)"}`);
-  }
-
-  return { call: getCall(id) };
-}
 
 function verifyTwilioRequest(req: express.Request, res: express.Response, next: express.NextFunction) {
   if (!hasTwilioConfig()) return next();
@@ -84,9 +46,7 @@ router.get("/api/calls", (_req, res) => {
 
 router.post("/api/calls/start", async (req, res) => {
   const parsed = reservationSchema.safeParse(req.body);
-  if (!parsed.success) {
-    return res.status(400).json({ error: parsed.error.flatten() });
-  }
+  if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
 
   const call = createCall(parsed.data);
   updateStatus(call.id, "DIALING");
@@ -94,24 +54,14 @@ router.post("/api/calls/start", async (req, res) => {
 
   if (!hasTwilioConfig()) {
     attachTwilioSid(call.id, `SIM-${call.id.slice(0, 8)}`);
-    return res.status(202).json({
-      message: "Call queued (simulation mode)",
-      callId: call.id,
-      simulated: true,
-    });
+    return res.status(202).json({ message: "Call queued (simulation mode)", callId: call.id, simulated: true });
   }
 
   try {
     const outbound = await createOutboundCall({ to: call.reservation.businessPhone, callId: call.id });
     attachTwilioSid(call.id, outbound.sid);
     addTranscript(call.id, "system", `Twilio call created: ${outbound.sid}`);
-
-    return res.status(202).json({
-      message: "Twilio call queued",
-      callId: call.id,
-      twilioCallSid: outbound.sid,
-      simulated: false,
-    });
+    return res.status(202).json({ message: "Twilio call queued", callId: call.id, twilioCallSid: outbound.sid, simulated: false });
   } catch (error) {
     updateStatus(call.id, "FAILED");
     addTranscript(call.id, "system", `Twilio error: ${error instanceof Error ? error.message : "unknown"}`);
@@ -141,7 +91,6 @@ router.post("/api/twilio/status", verifyTwilioRequest, (req, res) => {
 router.post("/api/openclaw/callback", (req, res) => {
   const event = String(req.body?.event || "");
   const callId = String(req.body?.callId || "");
-
   if (!event) return res.status(400).json({ error: "event required" });
 
   if (event === "approval_required") {
@@ -150,8 +99,7 @@ router.post("/api/openclaw/callback", (req, res) => {
 
     return res.json({
       ok: true,
-      message:
-        `Approval needed: ${call.reservation.businessName} for ${call.reservation.partySize} on ${call.reservation.date} ${call.reservation.timePreferred}.`,
+      message: `Approval needed: ${call.reservation.businessName} for ${call.reservation.partySize} on ${call.reservation.date} ${call.reservation.timePreferred}.`,
       actions: [
         { label: "Approve", method: "POST", path: "/api/openclaw/decision", body: { callId, decision: "approve" } },
         { label: "Revise", method: "POST", path: "/api/openclaw/decision", body: { callId, decision: "revise" } },
@@ -177,6 +125,41 @@ router.post("/api/openclaw/decision", (req, res) => {
   return res.json({ ok: true, call: result.call });
 });
 
+router.post("/api/telegram/webhook", async (req, res) => {
+  if (env.telegramWebhookSecret) {
+    const got = req.header("x-telegram-bot-api-secret-token") || "";
+    if (got !== env.telegramWebhookSecret) return res.status(403).json({ error: "Invalid Telegram secret" });
+  }
+
+  const cb = req.body?.callback_query;
+  if (!cb) return res.json({ ok: true });
+
+  const data = String(cb.data || "");
+  const parts = data.split("|");
+  if (parts.length !== 3 || parts[0] !== "rc") {
+    await answerCallbackQuery(String(cb.id), "Unknown action");
+    return res.json({ ok: true });
+  }
+
+  const decision = parts[1] as "approve" | "revise" | "cancel";
+  const callId = parts[2];
+  const result = applyDecision(callId, decision, undefined);
+
+  if ("error" in result) {
+    await answerCallbackQuery(String(cb.id), "Call not found");
+    return res.json({ ok: true });
+  }
+
+  await answerCallbackQuery(String(cb.id), `Decision saved: ${decision}`);
+  const chatId = cb.message?.chat?.id;
+  const messageId = cb.message?.message_id;
+  if (chatId && messageId) {
+    await editMessage(chatId, messageId, `✅ Decision recorded: ${decision} (call ${callId})`);
+  }
+
+  return res.json({ ok: true, call: result.call });
+});
+
 router.post("/api/twilio/voice", verifyTwilioRequest, (req, res) => {
   const callId = String(req.query.callId || "");
   const call = getCall(callId);
@@ -186,10 +169,7 @@ router.post("/api/twilio/voice", verifyTwilioRequest, (req, res) => {
 
   const vr = new twilio.twiml.VoiceResponse();
   vr.say({ voice: "alice" }, buildAssistantIntro(call.reservation));
-  vr.say(
-    { voice: "alice" },
-    "Could you confirm availability and any important conditions like deposit or cancellation policy?",
-  );
+  vr.say({ voice: "alice" }, "Could you confirm availability and any important conditions like deposit or cancellation policy?");
 
   const gather = vr.gather({
     input: ["speech"],
@@ -209,7 +189,6 @@ router.post("/api/twilio/gather", verifyTwilioRequest, (req, res) => {
   const callId = String(req.query.callId || "");
   const speech = String(req.body?.SpeechResult || "").trim();
   const call = getCall(callId);
-
   if (!call) return res.status(404).send("Unknown call");
 
   addTranscript(callId, "business", speech || "(no speech captured)");
@@ -219,12 +198,7 @@ router.post("/api/twilio/gather", verifyTwilioRequest, (req, res) => {
   if (!speech) {
     vr.say({ voice: "alice" }, "I did not hear a response. I will follow up later. Thank you.");
     updateStatus(callId, "FAILED");
-    setOutcome(callId, {
-      status: "failed",
-      needsUserApproval: false,
-      confidence: 0.4,
-      reason: "No speech captured",
-    });
+    setOutcome(callId, { status: "failed", needsUserApproval: false, confidence: 0.4, reason: "No speech captured" });
     vr.hangup();
     return res.type("text/xml").send(vr.toString());
   }
@@ -236,17 +210,8 @@ router.post("/api/twilio/gather", verifyTwilioRequest, (req, res) => {
 
   if (unavailableSignal) {
     updateStatus(callId, "FAILED");
-    setOutcome(callId, {
-      status: "failed",
-      needsUserApproval: false,
-      confidence: 0.9,
-      reason: "Business reported no availability",
-    });
-    void notifyOpenClaw("call_failed", {
-      callId,
-      businessName: call.reservation.businessName,
-      reason: "Business reported no availability",
-    });
+    setOutcome(callId, { status: "failed", needsUserApproval: false, confidence: 0.9, reason: "Business reported no availability" });
+    void notifyOpenClaw("call_failed", { callId, businessName: call.reservation.businessName, reason: "Business reported no availability" });
     vr.say({ voice: "alice" }, "Understood, thank you for checking. Have a great day.");
     vr.hangup();
     return res.type("text/xml").send(vr.toString());
@@ -281,19 +246,21 @@ router.post("/api/twilio/gather", verifyTwilioRequest, (req, res) => {
         partySize: call.reservation.partySize,
         notes: speech,
       });
-    } else {
-      void notifyOpenClaw("call_confirmed", {
+      void sendApprovalPrompt({
         callId,
         businessName: call.reservation.businessName,
+        date: call.reservation.date,
+        time: call.reservation.timePreferred,
+        partySize: call.reservation.partySize,
+        notes: speech,
       });
+    } else {
+      void notifyOpenClaw("call_confirmed", { callId, businessName: call.reservation.businessName });
     }
 
-    vr.say(
-      { voice: "alice" },
-      needsApproval
-        ? "Thank you. I need to confirm final details with Felix and will call back if needed."
-        : `Perfect. Please confirm the reservation under ${call.reservation.nameForBooking}. Thank you.`,
-    );
+    vr.say({ voice: "alice" }, needsApproval
+      ? "Thank you. I need to confirm final details with Felix and will call back if needed."
+      : `Perfect. Please confirm the reservation under ${call.reservation.nameForBooking}. Thank you.`);
     vr.hangup();
     return res.type("text/xml").send(vr.toString());
   }

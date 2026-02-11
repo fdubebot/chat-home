@@ -12,6 +12,7 @@ Voice-calling workflow skeleton for phone reservations.
 - Twilio webhook signature verification
 - OpenClaw callback hook for approval/confirmation events
 - OpenClaw receiver endpoints (`/api/openclaw/callback`, `/api/openclaw/decision`)
+- Telegram approval buttons via webhook (`/api/telegram/webhook`)
 - User approval endpoint before final confirmation
 
 ## Quickstart
@@ -34,6 +35,12 @@ Optional callbacks to OpenClaw session:
 - `OPENCLAW_CALLBACK_TOKEN` — optional bearer token
 
 When a call needs approval, the service sends an `approval_required` event with call details.
+
+Telegram inline-button approvals:
+
+- set `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, optional `TELEGRAM_WEBHOOK_SECRET`
+- point your Telegram bot webhook to: `https://<your-host>/api/telegram/webhook`
+- on approval_required, the bot posts buttons (Approve / Revise / Cancel)
 
 ## Example flow
 
