@@ -8,6 +8,8 @@ import { notifyOpenClaw } from "../core/notify.js";
 import { applyDecision } from "../core/decision.js";
 import { answerCallbackQuery, editMessage, sendApprovalPrompt } from "../core/telegram.js";
 import { buildAssistantIntro, needsHumanConfirmation } from "../core/policy.js";
+import { parseBusinessReply } from "../core/extract.js";
+import { decideFromReply } from "../core/negotiate.js";
 import { createCall, getCall, updateStatus, addTranscript, setOutcome, attachTwilioSid, listCalls } from "../core/store.js";
 
 const reservationSchema = z.object({
@@ -203,28 +205,94 @@ router.post("/api/twilio/gather", verifyTwilioRequest, (req, res) => {
     return res.type("text/xml").send(vr.toString());
   }
 
-  const lower = speech.toLowerCase();
-  const hasAvailabilitySignal = /(yes|available|we can|sure|ok|okay)/.test(lower);
-  const unavailableSignal = /(no availability|not available|fully booked|sold out|cannot)/.test(lower);
-  const risky = needsHumanConfirmation(speech, call.reservation.policy?.allowAutoConfirm ?? false);
+  const parsed = parseBusinessReply(speech);
+  const decision = decideFromReply(parsed, call.reservation);
 
-  if (unavailableSignal) {
+  if (decision.status === "reject") {
     updateStatus(callId, "FAILED");
-    setOutcome(callId, { status: "failed", needsUserApproval: false, confidence: 0.9, reason: "Business reported no availability" });
-    void notifyOpenClaw("call_failed", { callId, businessName: call.reservation.businessName, reason: "Business reported no availability" });
+    setOutcome(callId, {
+      status: "failed",
+      needsUserApproval: false,
+      confidence: parsed.confidence,
+      reason: decision.reason,
+    });
+    void notifyOpenClaw("call_failed", { callId, businessName: call.reservation.businessName, reason: decision.reason });
     vr.say({ voice: "alice" }, "Understood, thank you for checking. Have a great day.");
     vr.hangup();
     return res.type("text/xml").send(vr.toString());
   }
 
-  if (hasAvailabilitySignal) {
-    const needsApproval = risky || !(call.reservation.policy?.allowAutoConfirm ?? false);
-
+  if (decision.status === "confirm") {
+    const confirmedTime = decision.proposedTime || call.reservation.timePreferred;
     setOutcome(callId, {
-      status: needsApproval ? "pending" : "confirmed",
-      needsUserApproval: needsApproval,
-      confidence: 0.8,
-      reason: risky ? "Potential risky condition mentioned" : "Availability found",
+      status: "confirmed",
+      needsUserApproval: false,
+      confidence: parsed.confidence,
+      reason: decision.reason,
+      confirmedDetails: {
+        date: call.reservation.date,
+        time: confirmedTime,
+        partySize: call.reservation.partySize,
+        name: call.reservation.nameForBooking,
+        notes: decision.notes,
+      },
+    });
+
+    updateStatus(callId, "CONFIRMED");
+    void notifyOpenClaw("call_confirmed", { callId, businessName: call.reservation.businessName });
+
+    vr.say({ voice: "alice" }, `Perfect. Please confirm the reservation under ${call.reservation.nameForBooking}. Thank you.`);
+    vr.hangup();
+    return res.type("text/xml").send(vr.toString());
+  }
+
+  if (decision.status === "needs_approval") {
+    setOutcome(callId, {
+      status: "pending",
+      needsUserApproval: true,
+      confidence: parsed.confidence,
+      reason: decision.reason,
+      confirmedDetails: {
+        date: call.reservation.date,
+        time: decision.proposedTime || call.reservation.timePreferred,
+        partySize: call.reservation.partySize,
+        name: call.reservation.nameForBooking,
+        notes: decision.notes,
+      },
+    });
+
+    updateStatus(callId, "WAITING_USER_APPROVAL");
+    void notifyOpenClaw("approval_required", {
+      callId,
+      businessName: call.reservation.businessName,
+      phone: call.reservation.businessPhone,
+      date: call.reservation.date,
+      time: decision.proposedTime || call.reservation.timePreferred,
+      partySize: call.reservation.partySize,
+      notes: decision.notes,
+    });
+    void sendApprovalPrompt({
+      callId,
+      businessName: call.reservation.businessName,
+      date: call.reservation.date,
+      time: decision.proposedTime || call.reservation.timePreferred,
+      partySize: call.reservation.partySize,
+      notes: decision.notes,
+    });
+
+    vr.say({ voice: "alice" }, "Thank you. I need to confirm final details with Felix and will call back if needed.");
+    vr.hangup();
+    return res.type("text/xml").send(vr.toString());
+  }
+
+  const clarificationAttempts = call.transcript.filter((t) => t.speaker === "business").length;
+  if (clarificationAttempts >= 3) {
+    updateStatus(callId, "WAITING_USER_APPROVAL");
+    setOutcome(callId, {
+      status: "pending",
+      needsUserApproval: true,
+      confidence: parsed.confidence,
+      reason: "Ambiguous after multiple clarification attempts",
       confirmedDetails: {
         date: call.reservation.date,
         time: call.reservation.timePreferred,
@@ -233,34 +301,15 @@ router.post("/api/twilio/gather", verifyTwilioRequest, (req, res) => {
         notes: speech,
       },
     });
-
-    updateStatus(callId, needsApproval ? "WAITING_USER_APPROVAL" : "CONFIRMED");
-
-    if (needsApproval) {
-      void notifyOpenClaw("approval_required", {
-        callId,
-        businessName: call.reservation.businessName,
-        phone: call.reservation.businessPhone,
-        date: call.reservation.date,
-        time: call.reservation.timePreferred,
-        partySize: call.reservation.partySize,
-        notes: speech,
-      });
-      void sendApprovalPrompt({
-        callId,
-        businessName: call.reservation.businessName,
-        date: call.reservation.date,
-        time: call.reservation.timePreferred,
-        partySize: call.reservation.partySize,
-        notes: speech,
-      });
-    } else {
-      void notifyOpenClaw("call_confirmed", { callId, businessName: call.reservation.businessName });
-    }
-
-    vr.say({ voice: "alice" }, needsApproval
-      ? "Thank you. I need to confirm final details with Felix and will call back if needed."
-      : `Perfect. Please confirm the reservation under ${call.reservation.nameForBooking}. Thank you.`);
+    void sendApprovalPrompt({
+      callId,
+      businessName: call.reservation.businessName,
+      date: call.reservation.date,
+      time: call.reservation.timePreferred,
+      partySize: call.reservation.partySize,
+      notes: "Ambiguous response after multiple attempts",
+    });
+    vr.say({ voice: "alice" }, "Thank you. I will confirm details with Felix and follow up if needed.");
     vr.hangup();
     return res.type("text/xml").send(vr.toString());
   }
