@@ -10,6 +10,7 @@ import { answerCallbackQuery, editMessage, sendApprovalPrompt } from "../core/te
 import { buildAssistantIntro, needsHumanConfirmation } from "../core/policy.js";
 import { parseBusinessReply } from "../core/extract.js";
 import { decideFromReply } from "../core/negotiate.js";
+import { setPendingRevision, getPendingRevision, clearPendingRevision } from "../core/reviseSession.js";
 import { createCall, getCall, updateStatus, addTranscript, setOutcome, attachTwilioSid, listCalls, updateReservation } from "../core/store.js";
 
 const reservationSchema = z.object({
@@ -25,6 +26,50 @@ const reservationSchema = z.object({
 });
 
 export const router = express.Router();
+
+function parseRevisionText(text: string): { date?: string; timePreferred?: string; partySize?: number } {
+  const out: { date?: string; timePreferred?: string; partySize?: number } = {};
+  const date = text.match(/\b(20\d{2}-\d{2}-\d{2})\b/);
+  if (date) out.date = date[1];
+
+  const time = text.match(/\b([01]?\d|2[0-3])[:h]([0-5]\d)\b/);
+  if (time) out.timePreferred = `${time[1].padStart(2, "0")}:${time[2]}`;
+
+  const party = text.match(/(?:party|for|size)\s*(\d{1,2})/i) || text.match(/\b(\d{1,2})\s*(people|persons|guests)\b/i);
+  if (party) out.partySize = Number(party[1]);
+
+  return out;
+}
+
+async function runRecall(callId: string, patch: { date?: string; timePreferred?: string; partySize?: number }, notes?: string) {
+  const call = getCall(callId);
+  if (!call) return { error: "Call not found" as const };
+
+  updateReservation(callId, {
+    ...(patch.date ? { date: patch.date } : {}),
+    ...(patch.timePreferred ? { timePreferred: patch.timePreferred } : {}),
+    ...(typeof patch.partySize === "number" ? { partySize: patch.partySize } : {}),
+  });
+
+  addTranscript(callId, "system", `Recall requested with updates: ${JSON.stringify({ ...patch, notes })}`);
+  updateStatus(callId, "DIALING");
+
+  if (!hasTwilioConfig()) return { simulated: true, call: getCall(callId) };
+
+  const updated = getCall(callId);
+  if (!updated) return { error: "Call not found after update" as const };
+
+  try {
+    const outbound = await createOutboundCall({ to: updated.reservation.businessPhone, callId });
+    attachTwilioSid(callId, outbound.sid);
+    addTranscript(callId, "system", `Twilio recall created: ${outbound.sid}`);
+    return { simulated: false, call: getCall(callId), twilioCallSid: outbound.sid };
+  } catch (error) {
+    updateStatus(callId, "FAILED");
+    addTranscript(callId, "system", `Twilio recall error: ${error instanceof Error ? error.message : "unknown"}`);
+    return { error: "Failed to create recall" as const };
+  }
+}
 
 function verifyTwilioRequest(req: express.Request, res: express.Response, next: express.NextFunction) {
   if (!hasTwilioConfig()) return next();
@@ -133,6 +178,21 @@ router.post("/api/telegram/webhook", async (req, res) => {
     if (got !== env.telegramWebhookSecret) return res.status(403).json({ error: "Invalid Telegram secret" });
   }
 
+  const msg = req.body?.message;
+  if (msg?.chat?.id && typeof msg?.text === "string") {
+    const chatId = String(msg.chat.id);
+    const pendingCallId = getPendingRevision(chatId);
+    if (pendingCallId) {
+      const patch = parseRevisionText(msg.text);
+      const result = await runRecall(pendingCallId, patch, msg.text);
+      clearPendingRevision(chatId);
+      if ("error" in result) {
+        return res.json({ ok: true, message: `Revision failed: ${result.error}` });
+      }
+      return res.json({ ok: true, message: "Revision accepted and recall queued", callId: pendingCallId, ...result });
+    }
+  }
+
   const cb = req.body?.callback_query;
   if (!cb) return res.json({ ok: true });
 
@@ -147,15 +207,12 @@ router.post("/api/telegram/webhook", async (req, res) => {
   const callId = parts[2];
 
   if (decision === "revise") {
-    await answerCallbackQuery(String(cb.id), "Use /api/calls/:id/recall with revised time/date");
-    const chatId = cb.message?.chat?.id;
+    const chatId = String(cb.message?.chat?.id || "");
+    if (chatId) setPendingRevision(chatId, callId);
+    await answerCallbackQuery(String(cb.id), "Send new time/date, e.g. '2026-02-22 20:00 for 2'");
     const messageId = cb.message?.message_id;
     if (chatId && messageId) {
-      await editMessage(
-        chatId,
-        messageId,
-        `✏️ Revise requested for call ${callId}. Next: POST /api/calls/${callId}/recall with updated date/time.`,
-      );
+      await editMessage(chatId, messageId, `✏️ Send revised details now (example: 2026-02-22 20:00 for 2). Call ${callId}`);
     }
     return res.json({ ok: true, action: "revise_requested", callId });
   }
@@ -354,9 +411,6 @@ router.post("/api/calls/:id/approve", (req, res) => {
 
 router.post("/api/calls/:id/recall", async (req, res) => {
   const id = req.params.id;
-  const call = getCall(id);
-  if (!call) return res.status(404).json({ error: "Call not found" });
-
   const { date, timePreferred, partySize, notes } = req.body as {
     date?: string;
     timePreferred?: string;
@@ -364,32 +418,13 @@ router.post("/api/calls/:id/recall", async (req, res) => {
     notes?: string;
   };
 
-  updateReservation(id, {
-    ...(date ? { date } : {}),
-    ...(timePreferred ? { timePreferred } : {}),
-    ...(typeof partySize === "number" ? { partySize } : {}),
-  });
-
-  addTranscript(id, "system", `Recall requested with updates: ${JSON.stringify({ date, timePreferred, partySize, notes })}`);
-  updateStatus(id, "DIALING");
-
-  if (!hasTwilioConfig()) {
-    return res.json({ ok: true, simulated: true, call: getCall(id) });
+  const result = await runRecall(id, { date, timePreferred, partySize }, notes);
+  if ("error" in result) {
+    const code = result.error === "Call not found" ? 404 : 502;
+    return res.status(code).json({ error: result.error });
   }
 
-  try {
-    const updated = getCall(id);
-    if (!updated) return res.status(404).json({ error: "Call not found after update" });
-
-    const outbound = await createOutboundCall({ to: updated.reservation.businessPhone, callId: id });
-    attachTwilioSid(id, outbound.sid);
-    addTranscript(id, "system", `Twilio recall created: ${outbound.sid}`);
-    return res.json({ ok: true, simulated: false, call: getCall(id), twilioCallSid: outbound.sid });
-  } catch (error) {
-    updateStatus(id, "FAILED");
-    addTranscript(id, "system", `Twilio recall error: ${error instanceof Error ? error.message : "unknown"}`);
-    return res.status(502).json({ error: "Failed to create recall" });
-  }
+  return res.json({ ok: true, ...result });
 });
 
 router.get("/api/calls/:id", (req, res) => {

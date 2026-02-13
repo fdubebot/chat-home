@@ -13,6 +13,7 @@ Voice-calling workflow skeleton for phone reservations.
 - OpenClaw callback hook for approval/confirmation events
 - OpenClaw receiver endpoints (`/api/openclaw/callback`, `/api/openclaw/decision`)
 - Telegram approval buttons via webhook (`/api/telegram/webhook`)
+- Natural Telegram revise flow (click Revise, then send text like `2026-02-22 20:00 for 2`)
 - Negotiation parser + policy decision engine (`core/extract.ts`, `core/negotiate.ts`)
 - Clarification retry loop with escalation after repeated ambiguity
 - User approval endpoint before final confirmation
