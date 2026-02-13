@@ -10,7 +10,7 @@ import { answerCallbackQuery, editMessage, sendApprovalPrompt } from "../core/te
 import { buildAssistantIntro, needsHumanConfirmation } from "../core/policy.js";
 import { parseBusinessReply } from "../core/extract.js";
 import { decideFromReply } from "../core/negotiate.js";
-import { createCall, getCall, updateStatus, addTranscript, setOutcome, attachTwilioSid, listCalls } from "../core/store.js";
+import { createCall, getCall, updateStatus, addTranscript, setOutcome, attachTwilioSid, listCalls, updateReservation } from "../core/store.js";
 
 const reservationSchema = z.object({
   requestId: z.string().optional().default(""),
@@ -145,8 +145,22 @@ router.post("/api/telegram/webhook", async (req, res) => {
 
   const decision = parts[1] as "approve" | "revise" | "cancel";
   const callId = parts[2];
-  const result = applyDecision(callId, decision, undefined);
 
+  if (decision === "revise") {
+    await answerCallbackQuery(String(cb.id), "Use /api/calls/:id/recall with revised time/date");
+    const chatId = cb.message?.chat?.id;
+    const messageId = cb.message?.message_id;
+    if (chatId && messageId) {
+      await editMessage(
+        chatId,
+        messageId,
+        `✏️ Revise requested for call ${callId}. Next: POST /api/calls/${callId}/recall with updated date/time.`,
+      );
+    }
+    return res.json({ ok: true, action: "revise_requested", callId });
+  }
+
+  const result = applyDecision(callId, decision, undefined);
   if ("error" in result) {
     await answerCallbackQuery(String(cb.id), "Call not found");
     return res.json({ ok: true });
@@ -336,6 +350,46 @@ router.post("/api/calls/:id/approve", (req, res) => {
   if ("error" in result) return res.status(404).json({ error: result.error });
 
   return res.json({ ok: true, call: result.call });
+});
+
+router.post("/api/calls/:id/recall", async (req, res) => {
+  const id = req.params.id;
+  const call = getCall(id);
+  if (!call) return res.status(404).json({ error: "Call not found" });
+
+  const { date, timePreferred, partySize, notes } = req.body as {
+    date?: string;
+    timePreferred?: string;
+    partySize?: number;
+    notes?: string;
+  };
+
+  updateReservation(id, {
+    ...(date ? { date } : {}),
+    ...(timePreferred ? { timePreferred } : {}),
+    ...(typeof partySize === "number" ? { partySize } : {}),
+  });
+
+  addTranscript(id, "system", `Recall requested with updates: ${JSON.stringify({ date, timePreferred, partySize, notes })}`);
+  updateStatus(id, "DIALING");
+
+  if (!hasTwilioConfig()) {
+    return res.json({ ok: true, simulated: true, call: getCall(id) });
+  }
+
+  try {
+    const updated = getCall(id);
+    if (!updated) return res.status(404).json({ error: "Call not found after update" });
+
+    const outbound = await createOutboundCall({ to: updated.reservation.businessPhone, callId: id });
+    attachTwilioSid(id, outbound.sid);
+    addTranscript(id, "system", `Twilio recall created: ${outbound.sid}`);
+    return res.json({ ok: true, simulated: false, call: getCall(id), twilioCallSid: outbound.sid });
+  } catch (error) {
+    updateStatus(id, "FAILED");
+    addTranscript(id, "system", `Twilio recall error: ${error instanceof Error ? error.message : "unknown"}`);
+    return res.status(502).json({ error: "Failed to create recall" });
+  }
 });
 
 router.get("/api/calls/:id", (req, res) => {

@@ -77,6 +77,14 @@ export function attachTwilioSid(id: string, sid: string) {
   persist();
 }
 
+export function updateReservation(id: string, patch: Partial<CallRecord["reservation"]>) {
+  const rec = calls.get(id);
+  if (!rec) return;
+  rec.reservation = { ...rec.reservation, ...patch };
+  rec.updatedAt = new Date().toISOString();
+  persist();
+}
+
 export function listCalls() {
   return Array.from(calls.values());
 }

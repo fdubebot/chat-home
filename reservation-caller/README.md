@@ -74,10 +74,16 @@ curl -X POST http://localhost:8787/api/calls/<CALL_ID>/approve \
   -d '{"decision":"approve","notes":"Proceed"}'
 ```
 
+4. Re-call with revised terms:
+```bash
+curl -X POST http://localhost:8787/api/calls/<CALL_ID>/recall \
+  -H 'content-type: application/json' \
+  -d '{"date":"2026-02-22","timePreferred":"20:00","notes":"try later slot"}'
+```
+
 ## Next coding steps
 
-- Add real Twilio outbound call creation in `/api/calls/start`
-- Implement Twilio Voice webhook XML responses
 - Integrate real-time STT/TTS loop
 - Persist state in Postgres/Redis
-- Add OpenClaw callback hook for user approvals
+- Add natural-language revise flow (capture revised time directly from Telegram text)
+- Add outbound callback call when revised slot gets approved
