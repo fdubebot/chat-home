@@ -86,3 +86,19 @@ export async function editMessage(chatId: string | number, messageId: number, te
     // best effort
   }
 }
+
+export async function sendMessage(chatId: string | number, text: string) {
+  if (!hasTelegramConfig()) return;
+  try {
+    await fetch(apiUrl("sendMessage"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        chat_id: chatId,
+        text,
+      }),
+    });
+  } catch {
+    // best effort
+  }
+}

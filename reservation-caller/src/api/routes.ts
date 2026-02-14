@@ -6,7 +6,7 @@ import { env, hasTwilioConfig } from "../config/env.js";
 import { createOutboundCall } from "../core/twilio.js";
 import { notifyOpenClaw } from "../core/notify.js";
 import { applyDecision } from "../core/decision.js";
-import { answerCallbackQuery, editMessage, sendApprovalPrompt } from "../core/telegram.js";
+import { answerCallbackQuery, editMessage, sendApprovalPrompt, sendMessage } from "../core/telegram.js";
 import { buildAssistantIntro, needsHumanConfirmation } from "../core/policy.js";
 import { parseBusinessReply } from "../core/extract.js";
 import { decideFromReply } from "../core/negotiate.js";
@@ -184,11 +184,26 @@ router.post("/api/telegram/webhook", async (req, res) => {
     const pendingCallId = getPendingRevision(chatId);
     if (pendingCallId) {
       const patch = parseRevisionText(msg.text);
+      if (!patch.date && !patch.timePreferred && typeof patch.partySize !== "number") {
+        await sendMessage(chatId, "I couldn’t parse changes. Try: 2026-02-22 20:00 for 2");
+        return res.json({ ok: true, message: "No revision fields parsed" });
+      }
+
       const result = await runRecall(pendingCallId, patch, msg.text);
       clearPendingRevision(chatId);
+
       if ("error" in result) {
+        await sendMessage(chatId, `❌ Revision failed for ${pendingCallId}: ${result.error}`);
         return res.json({ ok: true, message: `Revision failed: ${result.error}` });
       }
+
+      const when = [patch.date, patch.timePreferred].filter(Boolean).join(" ") || "(unchanged)";
+      const party = typeof patch.partySize === "number" ? String(patch.partySize) : "(unchanged)";
+      await sendMessage(
+        chatId,
+        `🔁 Recall queued for ${pendingCallId}\nWhen: ${when}\nParty size: ${party}${result.simulated ? "\nMode: simulation" : ""}`,
+      );
+
       return res.json({ ok: true, message: "Revision accepted and recall queued", callId: pendingCallId, ...result });
     }
   }
