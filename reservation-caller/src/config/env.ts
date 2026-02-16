@@ -12,6 +12,17 @@ export const env = {
   telegramBotToken: process.env.TELEGRAM_BOT_TOKEN || "",
   telegramChatId: process.env.TELEGRAM_CHAT_ID || "",
   telegramWebhookSecret: process.env.TELEGRAM_WEBHOOK_SECRET || "",
+  callDialTimeoutMs: Number(process.env.CALL_DIAL_TIMEOUT_MS || 120000),
+  callConversationTimeoutMs: Number(process.env.CALL_CONVERSATION_TIMEOUT_MS || 600000),
+  twilioCreateTimeoutMs: Number(process.env.TWILIO_CREATE_TIMEOUT_MS || 12000),
+  twilioCreateMaxAttempts: Number(process.env.TWILIO_CREATE_MAX_ATTEMPTS || 3),
+  twilioMachineDetection: (process.env.TWILIO_MACHINE_DETECTION || "detect-message-end").toLowerCase(),
+  databaseUrl: process.env.DATABASE_URL || "",
+  elevenlabsApiKey: process.env.ELEVENLABS_API_KEY || "",
+  elevenlabsVoiceId: process.env.ELEVENLABS_VOICE_ID || "",
+  elevenlabsModelId: process.env.ELEVENLABS_MODEL_ID || "eleven_turbo_v2_5",
+  audioCacheDir: process.env.AUDIO_CACHE_DIR || "./data/audio-cache",
+  metricsToken: process.env.METRICS_TOKEN || "",
 };
 
 export function hasTwilioConfig() {

@@ -18,6 +18,12 @@ export type ReservationRequest = {
     allowDeposit?: boolean;
     requireHumanOnAmbiguity?: boolean;
   };
+  script?: {
+    intro?: string;
+    question?: string;
+    voicemail?: string;
+    mode?: "reservation" | "personal";
+  };
 };
 
 export type CallStatus =

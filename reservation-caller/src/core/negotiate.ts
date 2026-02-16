@@ -13,6 +13,14 @@ function parseTimeMinutes(t: string): number {
 
 export function decideFromReply(reply: ParsedBusinessReply, reservation: ReservationRequest): NegotiationDecision {
   if (reply.availability === "no") {
+    if (reply.offeredTimes.length > 0) {
+      return {
+        status: "needs_approval",
+        reason: `Business offered alternative time ${reply.offeredTimes[0]} after declining requested slot`,
+        proposedTime: reply.offeredTimes[0],
+        notes: reply.raw,
+      };
+    }
     return { status: "reject", reason: "Business reported no availability", notes: reply.raw };
   }
 
