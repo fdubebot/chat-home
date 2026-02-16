@@ -82,6 +82,13 @@ smsRouter.post("/api/twilio/sms", verifyTwilioRequest, async (req, res) => {
     const reply = buildSmartSmsReply(body);
     twiml.message(reply);
     logEvent("twilio.sms.auto_reply", { to: from, sid, replyPreview: reply.slice(0, 120) });
+
+    if (env.telegramChatId) {
+      void sendMessage(
+        env.telegramChatId,
+        `🤖 SMS auto-reply sent\nTo: ${from}\nSID: ${sid || "n/a"}\n\nReply: ${reply}`,
+      );
+    }
   }
 
   return res.type("text/xml").send(twiml.toString());
