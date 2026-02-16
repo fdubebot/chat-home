@@ -79,6 +79,10 @@ SMS support:
 - Receive inbound SMS webhook at `POST /api/twilio/sms`
 - Optional status callback at `POST /api/twilio/sms-status`
 - Inbound SMS is forwarded to OpenClaw callback (`sms_received`) and Telegram (if configured)
+- Auto-reply to inbound SMS is enabled by default (TwiML response)
+  - `SMS_AUTO_REPLY_ENABLED=true|false`
+  - `SMS_AUTO_REPLY_MESSAGE=...`
+  - Opt-out keywords (`STOP`, `UNSUBSCRIBE`, etc.) are not auto-replied
 
 ## Example flow
 

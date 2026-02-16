@@ -74,6 +74,14 @@ smsRouter.post("/api/twilio/sms", verifyTwilioRequest, async (req, res) => {
   }
 
   const twiml = new twilio.twiml.MessagingResponse();
+
+  const lower = body.trim().toLowerCase();
+  const isOptOutKeyword = ["stop", "stopall", "unsubscribe", "cancel", "end", "quit"].includes(lower);
+  if (env.smsAutoReplyEnabled && !isOptOutKeyword) {
+    twiml.message(env.smsAutoReplyMessage);
+    logEvent("twilio.sms.auto_reply", { to: from, sid });
+  }
+
   return res.type("text/xml").send(twiml.toString());
 });
 

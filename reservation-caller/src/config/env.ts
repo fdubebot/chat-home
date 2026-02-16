@@ -23,6 +23,10 @@ export const env = {
   elevenlabsModelId: process.env.ELEVENLABS_MODEL_ID || "eleven_turbo_v2_5",
   audioCacheDir: process.env.AUDIO_CACHE_DIR || "./data/audio-cache",
   metricsToken: process.env.METRICS_TOKEN || "",
+  smsAutoReplyEnabled: (process.env.SMS_AUTO_REPLY_ENABLED || "true").toLowerCase() === "true",
+  smsAutoReplyMessage:
+    process.env.SMS_AUTO_REPLY_MESSAGE ||
+    "Thanks for your message — Felix got it and will get back to you soon.",
 };
 
 export function hasTwilioConfig() {
