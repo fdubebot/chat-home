@@ -6,6 +6,7 @@ import { logEvent } from "../../core/log.js";
 import { notifyOpenClaw } from "../../core/notify.js";
 import { sendMessage } from "../../core/telegram.js";
 import { getTwilioClient } from "../../core/twilio.js";
+import { buildSmartSmsReply } from "../../core/smsReply.js";
 
 export const smsRouter = express.Router();
 
@@ -78,8 +79,9 @@ smsRouter.post("/api/twilio/sms", verifyTwilioRequest, async (req, res) => {
   const lower = body.trim().toLowerCase();
   const isOptOutKeyword = ["stop", "stopall", "unsubscribe", "cancel", "end", "quit"].includes(lower);
   if (env.smsAutoReplyEnabled && !isOptOutKeyword) {
-    twiml.message(env.smsAutoReplyMessage);
-    logEvent("twilio.sms.auto_reply", { to: from, sid });
+    const reply = buildSmartSmsReply(body);
+    twiml.message(reply);
+    logEvent("twilio.sms.auto_reply", { to: from, sid, replyPreview: reply.slice(0, 120) });
   }
 
   return res.type("text/xml").send(twiml.toString());
